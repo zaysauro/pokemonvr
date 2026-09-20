@@ -8,8 +8,16 @@ const DEMO_TARGET =
 const DEMO_CARD =
   "https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.png";
 
-const PIKACHU_MODEL =
-  "https://raw.githubusercontent.com/Pokemon-3D-api/assets/main/models/opt/regular/25.glb";
+const TARGET_MANIFEST = "/targets/pokemon-151.json";
+const DEFAULT_MODEL =
+  "https://raw.githubusercontent.com/Pokemon-3D-api/assets/main/models/opt/regular/7.glb";
+
+type TargetEntry = {
+  targetIndex: number;
+  dexNumber: number;
+  name: string;
+  modelUrl: string;
+};
 
 function loadScript(src: string) {
   return new Promise<void>((resolve, reject) => {
@@ -28,20 +36,34 @@ function loadScript(src: string) {
   });
 }
 
+async function loadManifest(): Promise<TargetEntry[]> {
+  const response = await fetch(TARGET_MANIFEST, { cache: "no-store" });
+  if (!response.ok) throw new Error("Could not load Pokémon target manifest.");
+  const data = await response.json();
+  return Array.isArray(data.targets) ? data.targets : [];
+}
+
 export default function ARExperience() {
   const stageRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<HTMLElement | null>(null);
-  const pokemonRef = useRef<HTMLElement | null>(null);
+  const activePokemonRef = useRef<HTMLElement | null>(null);
+  const activeTargetRef = useRef<number | null>(null);
 
   const [status, setStatus] = useState("Loading AR engine…");
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState(false);
+  const [pokemonName, setPokemonName] = useState<string | null>(null);
+  const [targetCount, setTargetCount] = useState(0);
 
   useEffect(() => {
     let disposed = false;
 
     async function start() {
       try {
+        setStatus("Loading Pokémon target catalog…");
+        const manifest = await loadManifest();
+        setTargetCount(manifest.length);
+
         setStatus("Loading A-Frame…");
         await loadScript("https://aframe.io/releases/1.8.0/aframe.min.js");
 
@@ -58,17 +80,15 @@ export default function ARExperience() {
         if (disposed || !stageRef.current) return;
 
         const targetMode =
-          process.env.NEXT_PUBLIC_AR_TARGET_MODE === "local"
-            ? "local"
-            : "demo";
+          process.env.NEXT_PUBLIC_AR_TARGET_MODE === "local" ? "local" : "demo";
 
         const target =
-          targetMode === "local" ? "/targets/pokemon-cards.mind" : DEMO_TARGET;
+          targetMode === "local" ? "/targets/pokemon-151.mind" : DEMO_TARGET;
 
         const scene = document.createElement("a-scene");
         scene.setAttribute(
           "mindar-image",
-          `imageTargetSrc: ${target}; autoStart: true;`
+          `imageTargetSrc: ${target}; autoStart: true; maxTrack: 1;`
         );
         scene.setAttribute(
           "renderer",
@@ -84,82 +104,95 @@ export default function ARExperience() {
 
         const assets = document.createElement("a-assets");
 
-        const card = document.createElement("img");
-        card.id = "reference-card";
-        card.crossOrigin = "anonymous";
-        card.src = targetMode === "local" ? "/targets/card.jpg" : DEMO_CARD;
+        if (targetMode === "demo") {
+          const card = document.createElement("img");
+          card.id = "reference-card";
+          card.crossOrigin = "anonymous";
+          card.src = DEMO_CARD;
+          assets.appendChild(card);
+        }
 
-        const model = document.createElement("a-asset-item");
-        model.id = "pikachu-model";
-        model.setAttribute("src", PIKACHU_MODEL);
-
-        assets.appendChild(card);
-        assets.appendChild(model);
+        for (const entry of manifest) {
+          const model = document.createElement("a-asset-item");
+          model.id = `pokemon-model-${entry.targetIndex}`;
+          model.setAttribute("src", entry.modelUrl);
+          assets.appendChild(model);
+        }
 
         const camera = document.createElement("a-camera");
         camera.setAttribute("position", "0 0 0");
         camera.setAttribute("look-controls", "enabled: false");
-
-        const targetEntity = document.createElement("a-entity");
-        targetEntity.setAttribute("mindar-image-target", "targetIndex: 0");
-
-        const cardPlane = document.createElement("a-plane");
-        cardPlane.setAttribute("src", "#reference-card");
-        cardPlane.setAttribute("position", "0 0 0");
-        cardPlane.setAttribute("rotation", "0 0 0");
-        cardPlane.setAttribute("width", "1");
-        cardPlane.setAttribute("height", "1.4");
-        cardPlane.setAttribute("material", "transparent: true; opacity: 0");
-
-        const pokemon = document.createElement("a-gltf-model");
-        pokemon.setAttribute("id", "pokemon");
-        pokemon.setAttribute("src", "#pikachu-model");
-        pokemon.setAttribute("position", "0 0.12 0.15");
-        pokemon.setAttribute("rotation", "0 0 0");
-        pokemon.setAttribute("scale", "0.35 0.35 0.35");
-        pokemon.setAttribute(
-          "animation-mixer",
-          "clip: *; loop: repeat; timeScale: 1"
-        );
-
-        targetEntity.appendChild(cardPlane);
-        targetEntity.appendChild(pokemon);
         scene.appendChild(assets);
         scene.appendChild(camera);
-        scene.appendChild(targetEntity);
+
+        const targetEntities: HTMLElement[] = [];
+
+        for (const entry of manifest) {
+          const targetEntity = document.createElement("a-entity");
+          targetEntity.setAttribute(
+            "mindar-image-target",
+            `targetIndex: ${entry.targetIndex}`
+          );
+          targetEntity.setAttribute("data-dex", String(entry.dexNumber));
+
+          const pokemon = document.createElement("a-gltf-model");
+          pokemon.setAttribute("id", `pokemon-${entry.targetIndex}`);
+          pokemon.setAttribute(
+            "src",
+            `#pokemon-model-${entry.targetIndex}`
+          );
+          pokemon.setAttribute("position", "0 0.12 0.15");
+          pokemon.setAttribute("rotation", "0 0 0");
+          pokemon.setAttribute("scale", "0.35 0.35 0.35");
+          pokemon.setAttribute(
+            "animation-mixer",
+            "clip: *; loop: repeat; timeScale: 1"
+          );
+
+          targetEntity.appendChild(pokemon);
+          scene.appendChild(targetEntity);
+          targetEntities.push(targetEntity);
+
+          targetEntity.addEventListener("targetFound", () => {
+            activePokemonRef.current = pokemon;
+            activeTargetRef.current = entry.targetIndex;
+            setFound(true);
+            setPokemonName(entry.name);
+            setStatus(`${entry.name} encontrado — modelo carregado.`);
+          });
+
+          targetEntity.addEventListener("targetLost", () => {
+            if (activeTargetRef.current === entry.targetIndex) {
+              setFound(false);
+              activePokemonRef.current = null;
+              activeTargetRef.current = null;
+              setPokemonName(null);
+              setStatus("Procure outra carta Pokémon…");
+            }
+          });
+        }
+
         stageRef.current.replaceChildren(scene);
-
         sceneRef.current = scene;
-        pokemonRef.current = pokemon;
-
-        targetEntity.addEventListener("targetFound", () => {
-          setFound(true);
-          setStatus("Card detected — Pikachu is ready!");
-        });
-
-        targetEntity.addEventListener("targetLost", () => {
-          setFound(false);
-          setStatus("Point the camera at the card…");
-        });
 
         scene.addEventListener("arReady", () => {
           setStatus(
             targetMode === "local"
-              ? "AR ready — scan your Pokémon card."
-              : "AR demo ready — scan the MindAR demo card."
+              ? `AR pronto — procurando ${targetCount || manifest.length} Pokémon.`
+              : "Modo demo — procure a carta de demonstração do MindAR."
           );
         });
 
         scene.addEventListener("arError", () => {
           setError(
-            "The camera/AR engine could not start. Check HTTPS, camera permission and browser compatibility."
+            "A câmera/AR não conseguiu iniciar. Verifique HTTPS, permissão da câmera e compatibilidade do navegador."
           );
         });
 
         setStatus(
           targetMode === "local"
-            ? "Starting camera…"
-            : "Demo mode: scan the on-screen demo card."
+            ? `Câmera iniciando — banco com ${manifest.length} targets.`
+            : "Modo demo: aponte para a carta de demonstração."
         );
       } catch (err) {
         if (!disposed) {
@@ -179,14 +212,14 @@ export default function ARExperience() {
           scene.systems["mindar-image"].stop();
         }
       } catch {
-        // Ignore teardown errors from WebAR libraries.
+        // Ignore teardown errors.
       }
       stageRef.current?.replaceChildren();
     };
   }, []);
 
   function playAnimation(clip: string) {
-    const pokemon = pokemonRef.current;
+    const pokemon = activePokemonRef.current;
     if (!pokemon) return;
 
     pokemon.setAttribute(
@@ -224,8 +257,8 @@ export default function ARExperience() {
         <div className="ar-bottom">
           <div className="help">
             {found
-              ? "Pikachu encontrado. Teste as animações abaixo."
-              : "Permita a câmera e aponte para a imagem-alvo."}
+              ? `${pokemonName ?? "Pokémon"} encontrado. O AR está rastreando esta carta.`
+              : `Aponte para uma carta. Banco configurado para os 151 iniciais (${targetCount} targets).`}
           </div>
 
           <button
