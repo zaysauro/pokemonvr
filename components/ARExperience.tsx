@@ -165,6 +165,7 @@ export default function ARExperience() {
   const [found, setFound] = useState(false);
   const [pokemonName, setPokemonName] = useState<string | null>(null);
   const [targetCount, setTargetCount] = useState(0);
+  const [cardDetails, setCardDetails] = useState<any | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -268,7 +269,7 @@ export default function ARExperience() {
           targetEntity.appendChild(pokemon);
           scene.appendChild(targetEntity);
 
-          targetEntity.addEventListener("targetFound", () => {
+          targetEntity.addEventListener("targetFound", async () => {
             activeTargetRef.current = entry.targetIndex;
             activePokemonRef.current = pokemon;
 
@@ -284,7 +285,28 @@ export default function ARExperience() {
 
             setFound(true);
             setPokemonName(entry.name);
-            setStatus(`${entry.name} encontrado — AR ativo.`);
+            setCardDetails(null);
+            setStatus(`${entry.name} encontrado — carregando dados da carta…`);
+
+            try {
+              const detailsResponse = await fetch(
+                `/api/card?id=${encodeURIComponent(entry.cardId)}`,
+                { cache: "force-cache" }
+              );
+
+              if (detailsResponse.ok) {
+                const details = await detailsResponse.json();
+                if (activeTargetRef.current === entry.targetIndex) {
+                  setCardDetails(details);
+                  setStatus(`${entry.name} encontrado — AR ativo.`);
+                }
+              }
+            } catch (detailsError) {
+              console.warn("TCGdex card details", detailsError);
+              if (activeTargetRef.current === entry.targetIndex) {
+                setStatus(`${entry.name} encontrado — AR ativo.`);
+              }
+            }
           });
 
           targetEntity.addEventListener("targetLost", () => {
@@ -293,6 +315,7 @@ export default function ARExperience() {
               activePokemonRef.current = null;
               activeTargetRef.current = null;
               setPokemonName(null);
+              setCardDetails(null);
               setStatus("Carta perdida. Aponte novamente para uma carta.");
             }
 
@@ -396,6 +419,38 @@ export default function ARExperience() {
               ? `${pokemonName ?? "Pokémon"} encontrado. O AR está rastreando esta carta.`
               : `Aponte para uma carta Pokémon. Reconhecimento configurado para os 151 Pokémon do set 151.`}
           </div>
+
+          {found && cardDetails && (
+            <div className="card-info">
+              <strong>
+                {cardDetails.name ?? pokemonName}
+                {cardDetails.localId ? ` #${cardDetails.localId}` : ""}
+              </strong>
+
+              <div className="card-info-grid">
+                {cardDetails.rarity && <span>Raridade: {cardDetails.rarity}</span>}
+                {cardDetails.hp && <span>HP: {cardDetails.hp}</span>}
+                {cardDetails.types?.length > 0 && (
+                  <span>Tipo: {cardDetails.types.join(" / ")}</span>
+                )}
+                {cardDetails.stage && <span>Estágio: {cardDetails.stage}</span>}
+              </div>
+
+              {cardDetails.abilities?.length > 0 && (
+                <div>
+                  <b>Habilidades:</b>{" "}
+                  {cardDetails.abilities.map((a: any) => a.name).join(", ")}
+                </div>
+              )}
+
+              {cardDetails.attacks?.length > 0 && (
+                <div>
+                  <b>Ataques:</b>{" "}
+                  {cardDetails.attacks.map((a: any) => a.name).join(", ")}
+                </div>
+              )}
+            </div>
+          )}
 
           <button
             className="ar-button"
