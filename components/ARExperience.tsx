@@ -2,21 +2,28 @@
 
 import { useEffect, useRef, useState } from "react";
 
-const DEMO_TARGET =
-  "https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.mind";
+const MINDAR_VERSION = "1.2.5";
+const MINDAR_SCRIPT = `https://cdn.jsdelivr.net/npm/mind-ar@${MINDAR_VERSION}/dist/mindar-image-aframe.prod.js`;
+const AFRAME_SCRIPT = "https://aframe.io/releases/1.8.0/aframe.min.js";
+const EXTRAS_SCRIPT =
+  "https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.7.0/dist/aframe-extras.min.js";
 
-const DEMO_CARD =
-  "https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.png";
-
-const TARGET_MANIFEST = "/targets/pokemon-151.json";
-const DEFAULT_MODEL =
-  "https://raw.githubusercontent.com/Pokemon-3D-api/assets/main/models/opt/regular/7.glb";
+const CATALOG_URL = "/api/pokemon-151";
+const CACHE_DB = "pokemonvr-ar-cache";
+const CACHE_STORE = "targets";
+const CACHE_KEY = "pokemon-151-mind-v3";
 
 type TargetEntry = {
   targetIndex: number;
   dexNumber: number;
   name: string;
+  cardId: string;
+  imageUrl: string;
   modelUrl: string;
+};
+
+type Catalog = {
+  targets: TargetEntry[];
 };
 
 function loadScript(src: string) {
@@ -31,16 +38,120 @@ function loadScript(src: string) {
     script.src = src;
     script.async = true;
     script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`Failed to load ${src}`));
+    script.onerror = () => reject(new Error(`Falha ao carregar ${src}`));
     document.head.appendChild(script);
   });
 }
 
-async function loadManifest(): Promise<TargetEntry[]> {
-  const response = await fetch(TARGET_MANIFEST, { cache: "no-store" });
-  if (!response.ok) throw new Error("Could not load Pokémon target manifest.");
-  const data = await response.json();
-  return Array.isArray(data.targets) ? data.targets : [];
+function openCache(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(CACHE_DB, 1);
+
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(CACHE_STORE);
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getCachedMind(): Promise<Blob | null> {
+  try {
+    const db = await openCache();
+
+    return await new Promise((resolve, reject) => {
+      const request = db
+        .transaction(CACHE_STORE, "readonly")
+        .objectStore(CACHE_STORE)
+        .get(CACHE_KEY);
+
+      request.onsuccess = () => resolve(request.result ?? null);
+      request.onerror = () => reject(request.error);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function saveCachedMind(blob: Blob) {
+  try {
+    const db = await openCache();
+
+    await new Promise<void>((resolve, reject) => {
+      const request = db
+        .transaction(CACHE_STORE, "readwrite")
+        .objectStore(CACHE_STORE)
+        .put(blob, CACHE_KEY);
+
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } catch {
+    // Cache is only an optimization. AR can still work without it.
+  }
+}
+
+function loadImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+
+    const timeout = window.setTimeout(() => {
+      reject(new Error(`Timeout carregando imagem da carta: ${url}`));
+    }, 20000);
+
+    image.onload = () => {
+      window.clearTimeout(timeout);
+      resolve(image);
+    };
+
+    image.onerror = () => {
+      window.clearTimeout(timeout);
+      reject(new Error(`Não consegui carregar a imagem da carta: ${url}`));
+    };
+
+    image.src = url;
+  });
+}
+
+async function buildMindFile(
+  targets: TargetEntry[],
+  onProgress: (value: number) => void
+): Promise<Blob> {
+  const mindar = (window as any).MINDAR;
+
+  if (!mindar?.IMAGE?.Compiler) {
+    throw new Error(
+      "O compilador MindAR não foi carregado. Recarregue a página."
+    );
+  }
+
+  const compiler = new mindar.IMAGE.Compiler();
+  const images: HTMLImageElement[] = [];
+
+  for (let i = 0; i < targets.length; i++) {
+    onProgress(Math.round((i / targets.length) * 30));
+
+    const image = await loadImage(targets[i].imageUrl);
+    images.push(image);
+  }
+
+  onProgress(32);
+
+  await compiler.compileImageTargets(images, (progress: number) => {
+    onProgress(32 + Math.round(progress * 0.68));
+  });
+
+  const buffer = await compiler.exportData();
+  return new Blob([buffer], { type: "application/octet-stream" });
+}
+
+function setMindar(scene: HTMLElement, imageTargetSrc: string) {
+  scene.setAttribute(
+    "mindar-image",
+    `imageTargetSrc: ${imageTargetSrc}; autoStart: true; maxTrack: 1; uiLoading: no; uiScanning: no; uiError: no;`
+  );
 }
 
 export default function ARExperience() {
@@ -49,7 +160,7 @@ export default function ARExperience() {
   const activePokemonRef = useRef<HTMLElement | null>(null);
   const activeTargetRef = useRef<number | null>(null);
 
-  const [status, setStatus] = useState("Loading AR engine…");
+  const [status, setStatus] = useState("Preparando AR…");
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState(false);
   const [pokemonName, setPokemonName] = useState<string | null>(null);
@@ -57,39 +168,67 @@ export default function ARExperience() {
 
   useEffect(() => {
     let disposed = false;
+    let mindUrl: string | null = null;
 
     async function start() {
       try {
-        setStatus("Loading Pokémon target catalog…");
-        const manifest = await loadManifest();
-        setTargetCount(manifest.length);
+        setError(null);
+        setStatus("Carregando catálogo Pokémon 151…");
 
-        setStatus("Loading A-Frame…");
-        await loadScript("https://aframe.io/releases/1.8.0/aframe.min.js");
+        const catalogResponse = await fetch(CATALOG_URL, {
+          cache: "no-store",
+        });
 
-        setStatus("Loading animation support…");
-        await loadScript(
-          "https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.7.0/dist/aframe-extras.min.js"
-        );
+        if (!catalogResponse.ok) {
+          throw new Error("Não consegui carregar o catálogo Pokémon 151.");
+        }
 
-        setStatus("Loading MindAR…");
-        await loadScript(
-          "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"
-        );
+        const catalog = (await catalogResponse.json()) as Catalog;
+        const targets = catalog.targets;
+
+        if (targets.length < 151) {
+          throw new Error(
+            `O catálogo retornou apenas ${targets.length}/151 cartas Pokémon.`
+          );
+        }
+
+        setTargetCount(targets.length);
+
+        setStatus("Carregando A-Frame…");
+        await loadScript(AFRAME_SCRIPT);
+
+        setStatus("Carregando suporte de animação…");
+        await loadScript(EXTRAS_SCRIPT);
+
+        setStatus("Carregando MindAR…");
+        await loadScript(MINDAR_SCRIPT);
 
         if (disposed || !stageRef.current) return;
 
-        const targetMode =
-          process.env.NEXT_PUBLIC_AR_TARGET_MODE === "local" ? "local" : "demo";
+        let mindBlob = await getCachedMind();
 
-        const target =
-          targetMode === "local" ? "/targets/pokemon-151.mind" : DEMO_TARGET;
+        if (mindBlob) {
+          setStatus("Target bank 151 encontrado no cache. Inicializando câmera…");
+        } else {
+          setStatus(
+            "Primeiro acesso: preparando as 151 cartas… isso pode levar alguns minutos."
+          );
+
+          mindBlob = await buildMindFile(targets, (progress) => {
+            if (!disposed) {
+              setStatus(`Preparando banco AR: ${progress}%`);
+            }
+          });
+
+          await saveCachedMind(mindBlob);
+        }
+
+        if (disposed || !stageRef.current) return;
+
+        mindUrl = URL.createObjectURL(mindBlob);
 
         const scene = document.createElement("a-scene");
-        scene.setAttribute(
-          "mindar-image",
-          `imageTargetSrc: ${target}; autoStart: true; maxTrack: 1;`
-        );
+        setMindar(scene, mindUrl);
         scene.setAttribute(
           "renderer",
           "colorManagement: true; physicallyCorrectLights: true; antialias: true"
@@ -102,63 +241,50 @@ export default function ARExperience() {
         );
         scene.setAttribute("embedded", "");
 
-        const assets = document.createElement("a-assets");
-
-        if (targetMode === "demo") {
-          const card = document.createElement("img");
-          card.id = "reference-card";
-          card.crossOrigin = "anonymous";
-          card.src = DEMO_CARD;
-          assets.appendChild(card);
-        }
-
-        for (const entry of manifest) {
-          const model = document.createElement("a-asset-item");
-          model.id = `pokemon-model-${entry.targetIndex}`;
-          model.setAttribute("src", entry.modelUrl);
-          assets.appendChild(model);
-        }
-
         const camera = document.createElement("a-camera");
         camera.setAttribute("position", "0 0 0");
         camera.setAttribute("look-controls", "enabled: false");
-        scene.appendChild(assets);
         scene.appendChild(camera);
 
-        const targetEntities: HTMLElement[] = [];
-
-        for (const entry of manifest) {
+        for (const entry of targets) {
           const targetEntity = document.createElement("a-entity");
+
           targetEntity.setAttribute(
             "mindar-image-target",
             `targetIndex: ${entry.targetIndex}`
           );
           targetEntity.setAttribute("data-dex", String(entry.dexNumber));
+          targetEntity.setAttribute("data-name", entry.name);
 
           const pokemon = document.createElement("a-gltf-model");
-          pokemon.setAttribute("id", `pokemon-${entry.targetIndex}`);
           pokemon.setAttribute(
-            "src",
-            `#pokemon-model-${entry.targetIndex}`
+            "position",
+            "0 0.12 0.15"
           );
-          pokemon.setAttribute("position", "0 0.12 0.15");
           pokemon.setAttribute("rotation", "0 0 0");
           pokemon.setAttribute("scale", "0.35 0.35 0.35");
-          pokemon.setAttribute(
-            "animation-mixer",
-            "clip: *; loop: repeat; timeScale: 1"
-          );
+          pokemon.setAttribute("visible", "false");
 
           targetEntity.appendChild(pokemon);
           scene.appendChild(targetEntity);
-          targetEntities.push(targetEntity);
 
           targetEntity.addEventListener("targetFound", () => {
-            activePokemonRef.current = pokemon;
             activeTargetRef.current = entry.targetIndex;
+            activePokemonRef.current = pokemon;
+
+            if (!pokemon.getAttribute("src")) {
+              pokemon.setAttribute("src", entry.modelUrl);
+              pokemon.setAttribute(
+                "animation-mixer",
+                "clip: *; loop: repeat; timeScale: 1"
+              );
+            }
+
+            pokemon.setAttribute("visible", "true");
+
             setFound(true);
             setPokemonName(entry.name);
-            setStatus(`${entry.name} encontrado — modelo carregado.`);
+            setStatus(`${entry.name} encontrado — AR ativo.`);
           });
 
           targetEntity.addEventListener("targetLost", () => {
@@ -167,37 +293,40 @@ export default function ARExperience() {
               activePokemonRef.current = null;
               activeTargetRef.current = null;
               setPokemonName(null);
-              setStatus("Procure outra carta Pokémon…");
+              setStatus("Carta perdida. Aponte novamente para uma carta.");
             }
+
+            pokemon.setAttribute("visible", "false");
           });
         }
+
+        scene.addEventListener("arReady", () => {
+          if (!disposed) {
+            setStatus(
+              `AR pronto — procurando qualquer uma das ${targets.length} cartas Pokémon 151.`
+            );
+          }
+        });
+
+        scene.addEventListener("arError", (event) => {
+          console.error("MindAR arError", event);
+          setError(
+            "O MindAR não conseguiu iniciar. Verifique a câmera, HTTPS e o navegador."
+          );
+        });
 
         stageRef.current.replaceChildren(scene);
         sceneRef.current = scene;
 
-        scene.addEventListener("arReady", () => {
-          setStatus(
-            targetMode === "local"
-              ? `AR pronto — procurando ${targetCount || manifest.length} Pokémon.`
-              : "Modo demo — procure a carta de demonstração do MindAR."
-          );
-        });
-
-        scene.addEventListener("arError", () => {
-          setError(
-            "A câmera/AR não conseguiu iniciar. Verifique HTTPS, permissão da câmera e compatibilidade do navegador."
-          );
-        });
-
         setStatus(
-          targetMode === "local"
-            ? `Câmera iniciando — banco com ${manifest.length} targets.`
-            : "Modo demo: aponte para a carta de demonstração."
+          `Câmera iniciando — ${targets.length} cartas carregadas no reconhecimento.`
         );
       } catch (err) {
+        console.error(err);
+
         if (!disposed) {
-          setError(err instanceof Error ? err.message : "Unknown AR error");
-          setStatus("AR failed to start");
+          setError(err instanceof Error ? err.message : "Erro desconhecido no AR.");
+          setStatus("Não foi possível iniciar o AR.");
         }
       }
     }
@@ -206,6 +335,7 @@ export default function ARExperience() {
 
     return () => {
       disposed = true;
+
       try {
         const scene = sceneRef.current as any;
         if (scene?.systems?.["mindar-image"]) {
@@ -214,7 +344,12 @@ export default function ARExperience() {
       } catch {
         // Ignore teardown errors.
       }
+
       stageRef.current?.replaceChildren();
+
+      if (mindUrl) {
+        URL.revokeObjectURL(mindUrl);
+      }
     };
   }, []);
 
@@ -246,6 +381,7 @@ export default function ARExperience() {
           <div className={`status ${error ? "error" : ""}`}>
             {error ?? status}
           </div>
+
           <button
             className="secondary"
             onClick={() => window.history.back()}
@@ -258,7 +394,7 @@ export default function ARExperience() {
           <div className="help">
             {found
               ? `${pokemonName ?? "Pokémon"} encontrado. O AR está rastreando esta carta.`
-              : `Aponte para uma carta. Banco configurado para os 151 iniciais (${targetCount} targets).`}
+              : `Aponte para uma carta Pokémon. Reconhecimento configurado para os 151 Pokémon do set 151.`}
           </div>
 
           <button
