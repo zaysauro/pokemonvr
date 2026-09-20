@@ -21,7 +21,6 @@ export async function GET() {
     .filter((card: any) => {
       const number = Number.parseInt(card.localId, 10);
       return (
-        card.category === "Pokemon" &&
         Number.isInteger(number) &&
         number >= 1 &&
         number <= 151 &&
