@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 
 const MINDAR_VERSION = "1.2.5";
+const MINDAR_CORE_SCRIPT = `https://cdn.jsdelivr.net/npm/mind-ar@${MINDAR_VERSION}/dist/mindar-image.prod.js`;
 const MINDAR_SCRIPT = `https://cdn.jsdelivr.net/npm/mind-ar@${MINDAR_VERSION}/dist/mindar-image-aframe.prod.js`;
-const AFRAME_SCRIPT = "https://aframe.io/releases/1.8.0/aframe.min.js";
+const AFRAME_SCRIPT = "https://aframe.io/releases/1.6.0/aframe.min.js";
 const EXTRAS_SCRIPT =
   "https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.7.0/dist/aframe-extras.min.js";
 
@@ -121,13 +122,13 @@ async function buildMindFile(
 ): Promise<Blob> {
   const mindar = (window as any).MINDAR;
 
-  if (!mindar?.IMAGE?.Compiler) {
+  if (!mindar?.Compiler) {
     throw new Error(
       "O compilador MindAR não foi carregado. Recarregue a página."
     );
   }
 
-  const compiler = new mindar.IMAGE.Compiler();
+  const compiler = new mindar.Compiler();
   const images: HTMLImageElement[] = [];
 
   for (let i = 0; i < targets.length; i++) {
@@ -194,6 +195,9 @@ export default function ARExperience() {
         }
 
         setTargetCount(targets.length);
+
+        setStatus("Carregando núcleo MindAR…");
+        await loadScript(MINDAR_CORE_SCRIPT);
 
         setStatus("Carregando A-Frame…");
         await loadScript(AFRAME_SCRIPT);
@@ -362,7 +366,7 @@ export default function ARExperience() {
       try {
         const scene = sceneRef.current as any;
         if (scene?.systems?.["mindar-image"]) {
-          scene.systems["mindar-image"].stop();
+          scene.systems["mindar-image-system"].stop();
         }
       } catch {
         // Ignore teardown errors.
